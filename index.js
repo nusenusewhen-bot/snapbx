@@ -61,18 +61,19 @@ async function dumpDebugInfo(label) {
   const html = await page.content();
   const url = page.url();
   const inputs = await page.evaluate(() => {
-    return Array.from(document.querySelectorAll("input")).map((el) => ({
+    return Array.from(document.querySelectorAll("input, textarea")).map((el) => ({
       type: el.type,
       name: el.name,
       id: el.id,
       placeholder: el.placeholder,
       autocomplete: el.autocomplete,
       className: el.className,
+      tagName: el.tagName,
       value: el.value ? el.value.substring(0, 3) + "..." : "",
       hidden: el.hidden,
       display: window.getComputedStyle(el).display,
       visibility: window.getComputedStyle(el).visibility,
-      rect: el.getBoundingClientRect(),
+      rect: JSON.stringify(el.getBoundingClientRect()),
     }));
   });
   const buttons = await page.evaluate(() => {
@@ -81,7 +82,7 @@ async function dumpDebugInfo(label) {
       type: el.type,
       disabled: el.disabled,
       className: el.className,
-      rect: el.getBoundingClientRect(),
+      rect: JSON.stringify(el.getBoundingClientRect()),
     }));
   });
 
@@ -93,61 +94,50 @@ async function dumpDebugInfo(label) {
   return debug;
 }
 
-async function findAnyInput(page, criteria) {
-  const allInputs = await page.evaluate((crit) => {
-    return Array.from(document.querySelectorAll("input, textarea")).map((el) => ({
-      type: el.type,
-      name: el.name,
-      id: el.id,
-      placeholder: el.placeholder || "",
-      autocomplete: el.autocomplete || "",
-      ariaLabel: el.getAttribute("aria-label") || "",
-      className: el.className,
-      tagName: el.tagName,
-    }));
+async function findInputByEvaluate(criteria) {
+  const result = await page.evaluate((crit) => {
+    const inputs = Array.from(document.querySelectorAll("input, textarea"));
+    for (const el of inputs) {
+      const type = el.type || "";
+      const name = el.name || "";
+      const placeholder = el.placeholder || "";
+      const autocomplete = el.autocomplete || "";
+      const ariaLabel = el.getAttribute("aria-label") || "";
+
+      const matches =
+        (crit.type && type === crit.type) ||
+        (crit.name && name.toLowerCase().includes(crit.name.toLowerCase())) ||
+        (crit.placeholder && placeholder.toLowerCase().includes(crit.placeholder.toLowerCase())) ||
+        (crit.autocomplete && autocomplete.toLowerCase().includes(crit.autocomplete.toLowerCase())) ||
+        (crit.ariaLabel && ariaLabel.toLowerCase().includes(crit.ariaLabel.toLowerCase()));
+
+      if (matches) {
+        return {
+          found: true,
+          id: el.id,
+          name: el.name,
+          type: el.type,
+          placeholder: el.placeholder,
+          className: el.className,
+          selector: el.id ? "#" + el.id : el.name ? 'input[name="' + el.name + '"]' : 'input[type="' + el.type + '"]',
+        };
+      }
+    }
+    return { found: false, count: inputs.length };
   }, criteria);
 
-  console.log("All inputs found:", JSON.stringify(allInputs, null, 2));
-
-  for (const input of allInputs) {
-    const matches =
-      (criteria.type && input.type === criteria.type) ||
-      (criteria.name && input.name.toLowerCase().includes(criteria.name.toLowerCase())) ||
-      (criteria.placeholder && input.placeholder.toLowerCase().includes(criteria.placeholder.toLowerCase())) ||
-      (criteria.autocomplete && input.autocomplete.toLowerCase().includes(criteria.autocomplete.toLowerCase())) ||
-      (criteria.ariaLabel && input.ariaLabel.toLowerCase().includes(criteria.ariaLabel.toLowerCase()));
-
-    if (matches) {
-      const selector = input.id
-        ? "#" + input.id
-        : input.name
-        ? 'input[name="' + input.name + '"]'
-        : 'input[placeholder="' + input.placeholder + '"]';
-      try {
-        const el = await page.waitForSelector(selector, { timeout: 5000 });
-        if (el) return { element: el, selector, info: input };
-      } catch {}
-    }
+  if (!result.found) {
+    console.log("No input matched criteria. Total inputs:", result.count);
+    return null;
   }
 
-  if (allInputs.length > 0) {
-    const first = allInputs[0];
-    const fallbackSel = first.id
-      ? "#" + first.id
-      : first.name
-      ? 'input[name="' + first.name + '"]'
-      : "input";
-    try {
-      const el = await page.waitForSelector(fallbackSel, { timeout: 5000 });
-      if (el) return { element: el, selector: fallbackSel, info: first };
-    } catch {}
-  }
-
-  return null;
+  console.log("Found input descriptor:", result.selector);
+  const el = await page.waitForSelector(result.selector, { timeout: 5000 });
+  return { element: el, selector: result.selector, info: result };
 }
 
 async function submitForm() {
-  const submitted = await page.evaluate(() => {
+  const method = await page.evaluate(() => {
     const form = document.querySelector("form");
     if (form) {
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
@@ -185,8 +175,8 @@ async function submitForm() {
     return "none";
   });
 
-  console.log("Submit method:", submitted);
-  return submitted !== "none";
+  console.log("Submit method:", method);
+  return method !== "none";
 }
 
 async function performLogin(email, password) {
@@ -199,7 +189,7 @@ async function performLogin(email, password) {
 
   await dumpDebugInfo("page_loaded");
 
-  const userInput = await findAnyInput(page, {
+  const userInput = await findInputByEvaluate({
     type: "text",
     name: "username",
     placeholder: "username",
@@ -207,11 +197,18 @@ async function performLogin(email, password) {
   });
 
   if (!userInput) {
-    throw new Error("No input field found at all on the page");
+    const allInputs = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("input")).map((el) => ({
+        type: el.type,
+        name: el.name,
+        id: el.id,
+        placeholder: el.placeholder,
+      }))
+    );
+    throw new Error("No username input found. All inputs: " + JSON.stringify(allInputs));
   }
 
-  console.log("Using input:", userInput.selector, userInput.info);
-  await userInput.element.click();
+  console.log("Typing username into:", userInput.selector);
   await userInput.element.type(email, { delay: 50 });
 
   await submitForm();
@@ -219,7 +216,7 @@ async function performLogin(email, password) {
 
   await dumpDebugInfo("after_username_submit");
 
-  const passInput = await findAnyInput(page, {
+  const passInput = await findInputByEvaluate({
     type: "password",
     name: "password",
     placeholder: "password",
@@ -236,12 +233,11 @@ async function performLogin(email, password) {
       }))
     );
     throw new Error(
-      "No password field found. All inputs on page: " + JSON.stringify(allInputs)
+      "No password input found. All inputs on page: " + JSON.stringify(allInputs)
     );
   }
 
-  console.log("Found password input:", passInput.selector, passInput.info);
-  await passInput.element.click();
+  console.log("Typing password into:", passInput.selector);
   await passInput.element.type(password, { delay: 50 });
 
   await submitForm();
@@ -249,7 +245,7 @@ async function performLogin(email, password) {
 
   await dumpDebugInfo("after_password_submit");
 
-  const twoFAField = await findAnyInput(page, {
+  const twoFAInput = await findInputByEvaluate({
     type: "text",
     name: "code",
     placeholder: "code",
@@ -257,7 +253,7 @@ async function performLogin(email, password) {
 
   const pageText = await page.evaluate(() => document.body.innerText);
   const is2FAPage =
-    twoFAField ||
+    twoFAInput ||
     /verification code|two.factor|2fa|authenticate|security code/i.test(pageText);
 
   if (is2FAPage) {
@@ -272,10 +268,10 @@ async function performLogin(email, password) {
       setTimeout(() => reject(new Error("2FA timeout — 120s expired")), 120000);
     });
 
-    if (twoFAField) {
-      await twoFAField.element.type(code, { delay: 100 });
+    if (twoFAInput) {
+      await twoFAInput.element.type(code, { delay: 100 });
     } else {
-      const generic = await findAnyInput(page, { type: "text" });
+      const generic = await findInputByEvaluate({ type: "text" });
       if (generic) await generic.element.type(code, { delay: 100 });
     }
 
