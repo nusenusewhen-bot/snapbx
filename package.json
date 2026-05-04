@@ -1,0 +1,21 @@
+{
+  "name": "snapbot",
+  "version": "1.0.0",
+  "description": "A bot that automates snapchat",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "bot": "node index.js"
+  },
+  "author": "Roger Rodrigues",
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "puppeteer": "^24.1.1",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "ws": "^8.16.0"
+  },
+  "license": "ISC"
+}
