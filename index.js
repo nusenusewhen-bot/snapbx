@@ -57,14 +57,44 @@ async function launchBrowser() {
   }
 }
 
-async function waitForAnySelector(page, selectors, options = {}) {
-  for (const selector of selectors) {
+async function clickNextButton() {
+  const nextSelectors = [
+    "button:has-text('Next')",
+    "button[type='submit']",
+    'button[data-testid*="next" i]',
+    'button[data-testid*="submit" i]',
+    "button:has-text('Continue')",
+    "button:has-text('Log In')",
+    "button:has-text('Sign In')",
+  ];
+
+  for (const sel of nextSelectors) {
     try {
-      const el = await page.waitForSelector(selector, { timeout: 5000, ...options });
-      if (el) return { element: el, selector };
+      const btn = await page.waitForSelector(sel, { timeout: 3000, visible: true });
+      if (btn) {
+        await btn.click();
+        console.log("Clicked button via:", sel);
+        return true;
+      }
     } catch {}
   }
-  throw new Error("None of the selectors found: " + selectors.join(", "));
+
+  const fallback = await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll("button"));
+    const nextBtn = buttons.find(
+      (b) =>
+        b.innerText.includes("Next") ||
+        b.innerText.includes("Continue") ||
+        b.innerText.includes("Log In")
+    );
+    if (nextBtn) {
+      nextBtn.click();
+      return true;
+    }
+    return false;
+  });
+
+  return fallback;
 }
 
 async function performLogin(email, password) {
@@ -76,7 +106,7 @@ async function performLogin(email, password) {
   });
 
   await page.waitForFunction(
-    () => document.querySelectorAll("input").length >= 2,
+    () => document.querySelectorAll("input").length >= 1,
     { timeout: 15000 }
   );
 
@@ -84,8 +114,8 @@ async function performLogin(email, password) {
     'input[name="username"]',
     'input[name="identifier"]',
     'input[name="accountIdentifier"]',
-    'input[type="text"]',
     'input[autocomplete="username"]',
+    'input[type="text"]',
     'input[placeholder*="username" i]',
     'input[placeholder*="email" i]',
     'input[placeholder*="phone" i]',
@@ -93,69 +123,76 @@ async function performLogin(email, password) {
     'input#identifier',
   ];
 
+  let userField = null;
+  let userSel = null;
+
+  for (const sel of usernameSelectors) {
+    try {
+      userField = await page.waitForSelector(sel, { timeout: 5000, visible: true });
+      if (userField) {
+        userSel = sel;
+        break;
+      }
+    } catch {}
+  }
+
+  if (!userField) {
+    throw new Error("Could not find username/email input field");
+  }
+
+  console.log("Found username field via:", userSel);
+  await userField.type(email, { delay: 50 });
+
+  const navPromise1 = page
+    .waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 })
+    .catch(() => {});
+
+  const clicked1 = await clickNextButton();
+  if (!clicked1) {
+    await page.keyboard.press("Enter");
+  }
+
+  await navPromise1;
+  await delay(3000);
+
   const passwordSelectors = [
     'input[name="password"]',
     'input[type="password"]',
     'input[autocomplete="current-password"]',
+    'input[placeholder*="password" i]',
     'input#password',
   ];
 
-  const submitSelectors = [
-    "button[type='submit']",
-    'button[data-testid="login-button"]',
-    "button:has-text('Log In')",
-    "button:has-text('Sign In')",
-    "button:has-text('Continue')",
-  ];
+  let passField = null;
+  let passSel = null;
 
-  const { element: userField, selector: userSel } = await waitForAnySelector(
-    page,
-    usernameSelectors,
-    { visible: true }
-  );
-  console.log("Found username field via:", userSel);
-
-  await userField.type(email, { delay: 50 });
-
-  const { element: passField, selector: passSel } = await waitForAnySelector(
-    page,
-    passwordSelectors,
-    { visible: true }
-  );
-  console.log("Found password field via:", passSel);
-
-  await passField.type(password, { delay: 50 });
-
-  let submitBtn = null;
-  for (const sel of submitSelectors) {
+  for (const sel of passwordSelectors) {
     try {
-      submitBtn = await page.waitForSelector(sel, { timeout: 3000, visible: true });
-      if (submitBtn) break;
+      passField = await page.waitForSelector(sel, { timeout: 8000, visible: true });
+      if (passField) {
+        passSel = sel;
+        break;
+      }
     } catch {}
   }
 
-  if (!submitBtn) {
-    submitBtn = await passField.evaluateHandle((el) => {
-      let node = el;
-      while (node && node.tagName !== "FORM") {
-        node = node.parentElement;
-        if (!node) break;
-      }
-      return node ? node.querySelector("button[type='submit'], button") : null;
-    });
+  if (!passField) {
+    throw new Error("Could not find password input field — may still be on username page");
   }
 
-  const navPromise = page
+  console.log("Found password field via:", passSel);
+  await passField.type(password, { delay: 50 });
+
+  const navPromise2 = page
     .waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 })
     .catch(() => {});
 
-  if (submitBtn && submitBtn.click) {
-    await submitBtn.click();
-  } else {
+  const clicked2 = await clickNextButton();
+  if (!clicked2) {
     await page.keyboard.press("Enter");
   }
 
-  await navPromise;
+  await navPromise2;
   await delay(3000);
 
   const twoFASelectors = [
@@ -170,15 +207,11 @@ async function performLogin(email, password) {
   ];
 
   let twoFAField = null;
-  let twoFASelector = null;
 
   for (const sel of twoFASelectors) {
     try {
       twoFAField = await page.waitForSelector(sel, { timeout: 3000, visible: true });
-      if (twoFAField) {
-        twoFASelector = sel;
-        break;
-      }
+      if (twoFAField) break;
     } catch {}
   }
 
@@ -206,16 +239,16 @@ async function performLogin(email, password) {
       if (genericInput) await genericInput.type(code, { delay: 100 });
     }
 
-    const submit2FA = await page.$("button[type='submit']");
-    if (submit2FA) {
-      await submit2FA.click();
-    } else {
+    const navPromise3 = page
+      .waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 })
+      .catch(() => {});
+
+    const clicked3 = await clickNextButton();
+    if (!clicked3) {
       await page.keyboard.press("Enter");
     }
 
-    await page
-      .waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 })
-      .catch(() => {});
+    await navPromise3;
   }
 
   const cookies = await page.cookies();
