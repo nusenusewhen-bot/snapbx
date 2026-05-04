@@ -58,34 +58,14 @@ async function launchBrowser() {
 }
 
 async function clickNextButton() {
-  const nextSelectors = [
-    "button:has-text('Next')",
-    "button[type='submit']",
-    'button[data-testid*="next" i]',
-    'button[data-testid*="submit" i]',
-    "button:has-text('Continue')",
-    "button:has-text('Log In')",
-    "button:has-text('Sign In')",
-  ];
-
-  for (const sel of nextSelectors) {
-    try {
-      const btn = await page.waitForSelector(sel, { timeout: 3000, visible: true });
-      if (btn) {
-        await btn.click();
-        console.log("Clicked button via:", sel);
-        return true;
-      }
-    } catch {}
-  }
-
-  const fallback = await page.evaluate(() => {
+  const clicked = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll("button"));
     const nextBtn = buttons.find(
       (b) =>
-        b.innerText.includes("Next") ||
-        b.innerText.includes("Continue") ||
-        b.innerText.includes("Log In")
+        b.innerText.trim() === "Next" ||
+        b.innerText.trim() === "Continue" ||
+        b.innerText.trim() === "Log In" ||
+        b.innerText.trim() === "Sign In"
     );
     if (nextBtn) {
       nextBtn.click();
@@ -94,7 +74,67 @@ async function clickNextButton() {
     return false;
   });
 
-  return fallback;
+  if (clicked) {
+    console.log("Clicked Next via text match");
+    return true;
+  }
+
+  const selectors = [
+    "button[type='submit']",
+    'button[data-testid*="next" i]',
+    'button[data-testid*="submit" i]',
+  ];
+
+  for (const sel of selectors) {
+    try {
+      const btn = await page.waitForSelector(sel, { timeout: 2000, visible: true });
+      if (btn) {
+        await btn.click();
+        console.log("Clicked button via selector:", sel);
+        return true;
+      }
+    } catch {}
+  }
+
+  return false;
+}
+
+async function waitForPasswordField(maxWaitMs = 15000) {
+  const passwordSelectors = [
+    'input[name="password"]',
+    'input[type="password"]',
+    'input[autocomplete="current-password"]',
+    'input[placeholder*="password" i]',
+    'input#password',
+  ];
+
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    for (const sel of passwordSelectors) {
+      try {
+        const el = await page.waitForSelector(sel, { timeout: 1000, visible: true });
+        if (el) {
+          console.log("Password field appeared via:", sel);
+          return el;
+        }
+      } catch {}
+    }
+    await delay(500);
+  }
+  return null;
+}
+
+async function waitForUrlChange(initialUrl, maxWaitMs = 15000) {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    const current = page.url();
+    if (current !== initialUrl) {
+      console.log("URL changed from", initialUrl, "to", current);
+      return current;
+    }
+    await delay(500);
+  }
+  return page.url();
 }
 
 async function performLogin(email, password) {
@@ -104,6 +144,9 @@ async function performLogin(email, password) {
     waitUntil: "networkidle2",
     timeout: 60000,
   });
+
+  const startUrl = page.url();
+  console.log("Starting URL:", startUrl);
 
   await page.waitForFunction(
     () => document.querySelectorAll("input").length >= 1,
@@ -143,57 +186,38 @@ async function performLogin(email, password) {
   console.log("Found username field via:", userSel);
   await userField.type(email, { delay: 50 });
 
-  const navPromise1 = page
-    .waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 })
-    .catch(() => {});
-
-  const clicked1 = await clickNextButton();
-  if (!clicked1) {
+  const clicked = await clickNextButton();
+  if (!clicked) {
     await page.keyboard.press("Enter");
+    console.log("Fell back to Enter key");
   }
 
-  await navPromise1;
-  await delay(3000);
+  await waitForUrlChange(startUrl, 10000);
+  await delay(2000);
 
-  const passwordSelectors = [
-    'input[name="password"]',
-    'input[type="password"]',
-    'input[autocomplete="current-password"]',
-    'input[placeholder*="password" i]',
-    'input#password',
-  ];
+  console.log("Current URL after username step:", page.url());
 
-  let passField = null;
-  let passSel = null;
-
-  for (const sel of passwordSelectors) {
-    try {
-      passField = await page.waitForSelector(sel, { timeout: 8000, visible: true });
-      if (passField) {
-        passSel = sel;
-        break;
-      }
-    } catch {}
-  }
-
+  const passField = await waitForPasswordField(15000);
   if (!passField) {
-    throw new Error("Could not find password input field — may still be on username page");
+    const html = await page.content();
+    fs.writeFileSync("./debug_username_page.html", html);
+    throw new Error(
+      "Could not find password input field. Debug HTML saved to debug_username_page.html — check if still on username page or if URL changed unexpectedly."
+    );
   }
 
-  console.log("Found password field via:", passSel);
   await passField.type(password, { delay: 50 });
 
-  const navPromise2 = page
-    .waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 })
-    .catch(() => {});
-
+  const passUrl = page.url();
   const clicked2 = await clickNextButton();
   if (!clicked2) {
     await page.keyboard.press("Enter");
   }
 
-  await navPromise2;
+  await waitForUrlChange(passUrl, 10000);
   await delay(3000);
+
+  console.log("Current URL after password step:", page.url());
 
   const twoFASelectors = [
     'input[name="code"]',
@@ -239,16 +263,13 @@ async function performLogin(email, password) {
       if (genericInput) await genericInput.type(code, { delay: 100 });
     }
 
-    const navPromise3 = page
-      .waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 })
-      .catch(() => {});
-
+    const codeUrl = page.url();
     const clicked3 = await clickNextButton();
     if (!clicked3) {
       await page.keyboard.press("Enter");
     }
 
-    await navPromise3;
+    await waitForUrlChange(codeUrl, 10000);
   }
 
   const cookies = await page.cookies();
