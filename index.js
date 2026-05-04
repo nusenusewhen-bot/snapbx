@@ -57,8 +57,55 @@ async function launchBrowser() {
   }
 }
 
+async function nativeClick(selector) {
+  return page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return false;
+    const rect = el.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    
+    const mousedown = new MouseEvent("mousedown", {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: x,
+      clientY: y,
+    });
+    const mouseup = new MouseEvent("mouseup", {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: x,
+      clientY: y,
+    });
+    const click = new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      clientX: x,
+      clientY: y,
+    });
+    
+    el.dispatchEvent(mousedown);
+    el.dispatchEvent(mouseup);
+    el.dispatchEvent(click);
+    return true;
+  }, selector);
+}
+
+async function clickNextViaKeyboard() {
+  await page.keyboard.press("Tab");
+  await delay(100);
+  await page.keyboard.press("Tab");
+  await delay(100);
+  await page.keyboard.press("Enter");
+  console.log("Submitted via Tab + Enter");
+  return true;
+}
+
 async function clickNextButton() {
-  const clicked = await page.evaluate(() => {
+  const textClicked = await page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll("button"));
     const nextBtn = buttons.find(
       (b) =>
@@ -67,15 +114,29 @@ async function clickNextButton() {
         b.innerText.trim() === "Log In" ||
         b.innerText.trim() === "Sign In"
     );
-    if (nextBtn) {
-      nextBtn.click();
-      return true;
-    }
-    return false;
+    if (!nextBtn) return false;
+
+    const rect = nextBtn.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+
+    ["mousedown", "mouseup", "click"].forEach((type) => {
+      nextBtn.dispatchEvent(
+        new MouseEvent(type, {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          clientX: x,
+          clientY: y,
+          button: 0,
+        })
+      );
+    });
+    return true;
   });
 
-  if (clicked) {
-    console.log("Clicked Next via text match");
+  if (textClicked) {
+    console.log("Clicked Next via native MouseEvent dispatch");
     return true;
   }
 
@@ -89,8 +150,8 @@ async function clickNextButton() {
     try {
       const btn = await page.waitForSelector(sel, { timeout: 2000, visible: true });
       if (btn) {
-        await btn.click();
-        console.log("Clicked button via selector:", sel);
+        await nativeClick(sel);
+        console.log("Clicked button via native click:", sel);
         return true;
       }
     } catch {}
@@ -99,13 +160,14 @@ async function clickNextButton() {
   return false;
 }
 
-async function waitForPasswordField(maxWaitMs = 15000) {
+async function waitForPasswordField(maxWaitMs = 20000) {
   const passwordSelectors = [
     'input[name="password"]',
     'input[type="password"]',
     'input[autocomplete="current-password"]',
     'input[placeholder*="password" i]',
     'input#password',
+    'input[aria-label*="password" i]',
   ];
 
   const start = Date.now();
@@ -184,37 +246,38 @@ async function performLogin(email, password) {
   }
 
   console.log("Found username field via:", userSel);
+  await userField.click();
   await userField.type(email, { delay: 50 });
 
   const clicked = await clickNextButton();
   if (!clicked) {
-    await page.keyboard.press("Enter");
-    console.log("Fell back to Enter key");
+    await clickNextViaKeyboard();
   }
 
-  await waitForUrlChange(startUrl, 10000);
-  await delay(2000);
+  await waitForUrlChange(startUrl, 15000);
+  await delay(3000);
 
   console.log("Current URL after username step:", page.url());
 
-  const passField = await waitForPasswordField(15000);
+  const passField = await waitForPasswordField(20000);
   if (!passField) {
     const html = await page.content();
     fs.writeFileSync("./debug_username_page.html", html);
     throw new Error(
-      "Could not find password input field. Debug HTML saved to debug_username_page.html — check if still on username page or if URL changed unexpectedly."
+      "Could not find password input field. Debug HTML saved to debug_username_page.html"
     );
   }
 
+  await passField.click();
   await passField.type(password, { delay: 50 });
 
   const passUrl = page.url();
   const clicked2 = await clickNextButton();
   if (!clicked2) {
-    await page.keyboard.press("Enter");
+    await clickNextViaKeyboard();
   }
 
-  await waitForUrlChange(passUrl, 10000);
+  await waitForUrlChange(passUrl, 15000);
   await delay(3000);
 
   console.log("Current URL after password step:", page.url());
@@ -266,10 +329,10 @@ async function performLogin(email, password) {
     const codeUrl = page.url();
     const clicked3 = await clickNextButton();
     if (!clicked3) {
-      await page.keyboard.press("Enter");
+      await clickNextViaKeyboard();
     }
 
-    await waitForUrlChange(codeUrl, 10000);
+    await waitForUrlChange(codeUrl, 15000);
   }
 
   const cookies = await page.cookies();
