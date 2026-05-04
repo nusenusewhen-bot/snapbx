@@ -57,146 +57,136 @@ async function launchBrowser() {
   }
 }
 
-async function nativeClick(selector) {
-  return page.evaluate((sel) => {
-    const el = document.querySelector(sel);
-    if (!el) return false;
-    const rect = el.getBoundingClientRect();
-    const x = rect.left + rect.width / 2;
-    const y = rect.top + rect.height / 2;
-    
-    const mousedown = new MouseEvent("mousedown", {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-      clientX: x,
-      clientY: y,
-    });
-    const mouseup = new MouseEvent("mouseup", {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-      clientX: x,
-      clientY: y,
-    });
-    const click = new MouseEvent("click", {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-      clientX: x,
-      clientY: y,
-    });
-    
-    el.dispatchEvent(mousedown);
-    el.dispatchEvent(mouseup);
-    el.dispatchEvent(click);
-    return true;
-  }, selector);
+async function dumpDebugInfo(label) {
+  const html = await page.content();
+  const url = page.url();
+  const inputs = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll("input")).map((el) => ({
+      type: el.type,
+      name: el.name,
+      id: el.id,
+      placeholder: el.placeholder,
+      autocomplete: el.autocomplete,
+      className: el.className,
+      value: el.value ? el.value.substring(0, 3) + "..." : "",
+      hidden: el.hidden,
+      display: window.getComputedStyle(el).display,
+      visibility: window.getComputedStyle(el).visibility,
+      rect: el.getBoundingClientRect(),
+    }));
+  });
+  const buttons = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll("button")).map((el) => ({
+      text: el.innerText.trim(),
+      type: el.type,
+      disabled: el.disabled,
+      className: el.className,
+      rect: el.getBoundingClientRect(),
+    }));
+  });
+
+  const debug = { url, label, timestamp: new Date().toISOString(), inputs, buttons };
+  const filename = "./debug_" + label.replace(/\s+/g, "_") + ".json";
+  fs.writeFileSync(filename, JSON.stringify(debug, null, 2));
+  fs.writeFileSync("./debug_last_page.html", html);
+  console.log("Debug dump saved:", filename);
+  return debug;
 }
 
-async function clickNextViaKeyboard() {
-  await page.keyboard.press("Tab");
-  await delay(100);
-  await page.keyboard.press("Tab");
-  await delay(100);
-  await page.keyboard.press("Enter");
-  console.log("Submitted via Tab + Enter");
-  return true;
+async function findAnyInput(page, criteria) {
+  const allInputs = await page.evaluate((crit) => {
+    return Array.from(document.querySelectorAll("input, textarea")).map((el) => ({
+      type: el.type,
+      name: el.name,
+      id: el.id,
+      placeholder: el.placeholder || "",
+      autocomplete: el.autocomplete || "",
+      ariaLabel: el.getAttribute("aria-label") || "",
+      className: el.className,
+      tagName: el.tagName,
+    }));
+  }, criteria);
+
+  console.log("All inputs found:", JSON.stringify(allInputs, null, 2));
+
+  for (const input of allInputs) {
+    const matches =
+      (criteria.type && input.type === criteria.type) ||
+      (criteria.name && input.name.toLowerCase().includes(criteria.name.toLowerCase())) ||
+      (criteria.placeholder && input.placeholder.toLowerCase().includes(criteria.placeholder.toLowerCase())) ||
+      (criteria.autocomplete && input.autocomplete.toLowerCase().includes(criteria.autocomplete.toLowerCase())) ||
+      (criteria.ariaLabel && input.ariaLabel.toLowerCase().includes(criteria.ariaLabel.toLowerCase()));
+
+    if (matches) {
+      const selector = input.id
+        ? "#" + input.id
+        : input.name
+        ? 'input[name="' + input.name + '"]'
+        : 'input[placeholder="' + input.placeholder + '"]';
+      try {
+        const el = await page.waitForSelector(selector, { timeout: 5000 });
+        if (el) return { element: el, selector, info: input };
+      } catch {}
+    }
+  }
+
+  if (allInputs.length > 0) {
+    const first = allInputs[0];
+    const fallbackSel = first.id
+      ? "#" + first.id
+      : first.name
+      ? 'input[name="' + first.name + '"]'
+      : "input";
+    try {
+      const el = await page.waitForSelector(fallbackSel, { timeout: 5000 });
+      if (el) return { element: el, selector: fallbackSel, info: first };
+    } catch {}
+  }
+
+  return null;
 }
 
-async function clickNextButton() {
-  const textClicked = await page.evaluate(() => {
+async function submitForm() {
+  const submitted = await page.evaluate(() => {
+    const form = document.querySelector("form");
+    if (form) {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      return "form_dispatch";
+    }
+
     const buttons = Array.from(document.querySelectorAll("button"));
     const nextBtn = buttons.find(
       (b) =>
         b.innerText.trim() === "Next" ||
         b.innerText.trim() === "Continue" ||
-        b.innerText.trim() === "Log In" ||
-        b.innerText.trim() === "Sign In"
+        b.innerText.trim() === "Log In"
     );
-    if (!nextBtn) return false;
 
-    const rect = nextBtn.getBoundingClientRect();
-    const x = rect.left + rect.width / 2;
-    const y = rect.top + rect.height / 2;
+    if (nextBtn) {
+      const rect = nextBtn.getBoundingClientRect();
+      const events = ["mousedown", "mouseup", "click", "pointerdown", "pointerup"];
+      events.forEach((type) => {
+        nextBtn.dispatchEvent(
+          new MouseEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: rect.left + rect.width / 2,
+            clientY: rect.top + rect.height / 2,
+            button: 0,
+            pointerType: "mouse",
+            isPrimary: true,
+          })
+        );
+      });
+      return "button_native_events";
+    }
 
-    ["mousedown", "mouseup", "click"].forEach((type) => {
-      nextBtn.dispatchEvent(
-        new MouseEvent(type, {
-          bubbles: true,
-          cancelable: true,
-          view: window,
-          clientX: x,
-          clientY: y,
-          button: 0,
-        })
-      );
-    });
-    return true;
+    return "none";
   });
 
-  if (textClicked) {
-    console.log("Clicked Next via native MouseEvent dispatch");
-    return true;
-  }
-
-  const selectors = [
-    "button[type='submit']",
-    'button[data-testid*="next" i]',
-    'button[data-testid*="submit" i]',
-  ];
-
-  for (const sel of selectors) {
-    try {
-      const btn = await page.waitForSelector(sel, { timeout: 2000, visible: true });
-      if (btn) {
-        await nativeClick(sel);
-        console.log("Clicked button via native click:", sel);
-        return true;
-      }
-    } catch {}
-  }
-
-  return false;
-}
-
-async function waitForPasswordField(maxWaitMs = 20000) {
-  const passwordSelectors = [
-    'input[name="password"]',
-    'input[type="password"]',
-    'input[autocomplete="current-password"]',
-    'input[placeholder*="password" i]',
-    'input#password',
-    'input[aria-label*="password" i]',
-  ];
-
-  const start = Date.now();
-  while (Date.now() - start < maxWaitMs) {
-    for (const sel of passwordSelectors) {
-      try {
-        const el = await page.waitForSelector(sel, { timeout: 1000, visible: true });
-        if (el) {
-          console.log("Password field appeared via:", sel);
-          return el;
-        }
-      } catch {}
-    }
-    await delay(500);
-  }
-  return null;
-}
-
-async function waitForUrlChange(initialUrl, maxWaitMs = 15000) {
-  const start = Date.now();
-  while (Date.now() - start < maxWaitMs) {
-    const current = page.url();
-    if (current !== initialUrl) {
-      console.log("URL changed from", initialUrl, "to", current);
-      return current;
-    }
-    await delay(500);
-  }
-  return page.url();
+  console.log("Submit method:", submitted);
+  return submitted !== "none";
 }
 
 async function performLogin(email, password) {
@@ -207,100 +197,63 @@ async function performLogin(email, password) {
     timeout: 60000,
   });
 
-  const startUrl = page.url();
-  console.log("Starting URL:", startUrl);
+  await dumpDebugInfo("page_loaded");
 
-  await page.waitForFunction(
-    () => document.querySelectorAll("input").length >= 1,
-    { timeout: 15000 }
-  );
+  const userInput = await findAnyInput(page, {
+    type: "text",
+    name: "username",
+    placeholder: "username",
+    autocomplete: "username",
+  });
 
-  const usernameSelectors = [
-    'input[name="username"]',
-    'input[name="identifier"]',
-    'input[name="accountIdentifier"]',
-    'input[autocomplete="username"]',
-    'input[type="text"]',
-    'input[placeholder*="username" i]',
-    'input[placeholder*="email" i]',
-    'input[placeholder*="phone" i]',
-    'input#username',
-    'input#identifier',
-  ];
-
-  let userField = null;
-  let userSel = null;
-
-  for (const sel of usernameSelectors) {
-    try {
-      userField = await page.waitForSelector(sel, { timeout: 5000, visible: true });
-      if (userField) {
-        userSel = sel;
-        break;
-      }
-    } catch {}
+  if (!userInput) {
+    throw new Error("No input field found at all on the page");
   }
 
-  if (!userField) {
-    throw new Error("Could not find username/email input field");
-  }
+  console.log("Using input:", userInput.selector, userInput.info);
+  await userInput.element.click();
+  await userInput.element.type(email, { delay: 50 });
 
-  console.log("Found username field via:", userSel);
-  await userField.click();
-  await userField.type(email, { delay: 50 });
+  await submitForm();
+  await delay(5000);
 
-  const clicked = await clickNextButton();
-  if (!clicked) {
-    await clickNextViaKeyboard();
-  }
+  await dumpDebugInfo("after_username_submit");
 
-  await waitForUrlChange(startUrl, 15000);
-  await delay(3000);
+  const passInput = await findAnyInput(page, {
+    type: "password",
+    name: "password",
+    placeholder: "password",
+    autocomplete: "current-password",
+  });
 
-  console.log("Current URL after username step:", page.url());
-
-  const passField = await waitForPasswordField(20000);
-  if (!passField) {
-    const html = await page.content();
-    fs.writeFileSync("./debug_username_page.html", html);
+  if (!passInput) {
+    const allInputs = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("input")).map((el) => ({
+        type: el.type,
+        name: el.name,
+        id: el.id,
+        placeholder: el.placeholder,
+      }))
+    );
     throw new Error(
-      "Could not find password input field. Debug HTML saved to debug_username_page.html"
+      "No password field found. All inputs on page: " + JSON.stringify(allInputs)
     );
   }
 
-  await passField.click();
-  await passField.type(password, { delay: 50 });
+  console.log("Found password input:", passInput.selector, passInput.info);
+  await passInput.element.click();
+  await passInput.element.type(password, { delay: 50 });
 
-  const passUrl = page.url();
-  const clicked2 = await clickNextButton();
-  if (!clicked2) {
-    await clickNextViaKeyboard();
-  }
+  await submitForm();
+  await delay(5000);
 
-  await waitForUrlChange(passUrl, 15000);
-  await delay(3000);
+  await dumpDebugInfo("after_password_submit");
 
-  console.log("Current URL after password step:", page.url());
-
-  const twoFASelectors = [
-    'input[name="code"]',
-    'input[name="otp"]',
-    'input[name="verificationCode"]',
-    'input[type="text"][maxlength="6"]',
-    'input[autocomplete="one-time-code"]',
-    'input[placeholder*="code" i]',
-    'input#code',
-    'input#otp',
-  ];
-
-  let twoFAField = null;
-
-  for (const sel of twoFASelectors) {
-    try {
-      twoFAField = await page.waitForSelector(sel, { timeout: 3000, visible: true });
-      if (twoFAField) break;
-    } catch {}
-  }
+  const twoFAField = await findAnyInput(page, {
+    type: "text",
+    name: "code",
+    placeholder: "code",
+  });
 
   const pageText = await page.evaluate(() => document.body.innerText);
   const is2FAPage =
@@ -320,19 +273,14 @@ async function performLogin(email, password) {
     });
 
     if (twoFAField) {
-      await twoFAField.type(code, { delay: 100 });
+      await twoFAField.element.type(code, { delay: 100 });
     } else {
-      const genericInput = await page.$('input[type="text"]');
-      if (genericInput) await genericInput.type(code, { delay: 100 });
+      const generic = await findAnyInput(page, { type: "text" });
+      if (generic) await generic.element.type(code, { delay: 100 });
     }
 
-    const codeUrl = page.url();
-    const clicked3 = await clickNextButton();
-    if (!clicked3) {
-      await clickNextViaKeyboard();
-    }
-
-    await waitForUrlChange(codeUrl, 15000);
+    await submitForm();
+    await delay(5000);
   }
 
   const cookies = await page.cookies();
@@ -342,7 +290,6 @@ async function performLogin(email, password) {
   const loggedIn =
     url.includes("web.snapchat.com") ||
     url.includes("accounts.snapchat.com/accounts/welcome") ||
-    url.includes("accounts.snapchat.com/accounts/v2") ||
     !url.includes("login");
 
   if (loggedIn) {
