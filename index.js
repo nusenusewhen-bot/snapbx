@@ -37,6 +37,7 @@ async function launchBrowser() {
       "--disable-dev-shm-usage",
       "--disable-accelerated-2d-canvas",
       "--disable-gpu",
+      "--window-size=1920,1080",
     ],
   });
   page = await browser.newPage();
@@ -56,6 +57,16 @@ async function launchBrowser() {
   }
 }
 
+async function waitForAnySelector(page, selectors, options = {}) {
+  for (const selector of selectors) {
+    try {
+      const el = await page.waitForSelector(selector, { timeout: 5000, ...options });
+      if (el) return { element: el, selector };
+    } catch {}
+  }
+  throw new Error(`None of the selectors found: ${selectors.join(", ")}`);
+}
+
 async function performLogin(email, password) {
   await launchBrowser();
 
@@ -64,27 +75,287 @@ async function performLogin(email, password) {
     timeout: 60000,
   });
 
-  await page.waitForSelector('input[name="username"]', {
-    visible: true,
-    timeout: 15000,
+  // Wait for the login form to hydrate — Snapchat renders a skeleton first
+  await page.waitForFunction(
+    () => document.querySelectorAll("input").length >= 2,
+    { timeout: 15000 }
+  );
+
+  // Try multiple possible selectors for the username/email field
+  const usernameSelectors = [
+    'input[name="username"]',
+    'input[name="identifier"]',
+    'input[name="accountIdentifier"]',
+    'input[type="text"]',
+    'input[autocomplete="username"]',
+    'input[placeholder*="username" i]',
+    'input[placeholder*="email" i]',
+    'input[placeholder*="phone" i]',
+    'input#username',
+    'input#identifier',
+  ];
+
+  const passwordSelectors = [
+    'input[name="password"]',
+    'input[type="password"]',
+    'input[autocomplete="current-password"]',
+    'input#password',
+  ];
+
+  const submitSelectors = [
+    "button[type='submit']",
+    'button[data-testid="login-button"]',
+    "button:has-text('Log In')",
+    "button:has-text('Sign In')",
+    "button:has-text('Continue')",
+  ];
+
+  const { element: userField, selector: userSel } = await waitForAnySelector(
+    page,
+    usernameSelectors,
+    { visible: true }
+  );
+  console.log("Found username field via:", userSel);
+
+  await userField.type(email, { delay: 50 });
+
+  const { element: passField, selector: passSel } = await waitForAnySelector(
+    page,
+    passwordSelectors,
+    { visible: true }
+  );
+  console.log("Found password field via:", passSel);
+
+  await passField.type(password, { delay: 50 });
+
+  // Try to find submit button
+  let submitBtn = null;
+  for (const sel of submitSelectors) {
+    try {
+      submitBtn = await page.waitForSelector(sel, { timeout: 3000, visible: true });
+      if (submitBtn) break;
+    } catch {}
+  }
+
+  if (!submitBtn) {
+    // Last resort: find any button near the password field
+    submitBtn = await passField.evaluateHandle((el) => {
+      let node = el;
+      while (node && node.tagName !== "FORM") {
+        node = node.parentElement;
+        if (!node) break;
+      }
+      return node ? node.querySelector("button[type='submit'], button") : null;
+    });
+  }
+
+  const navPromise = page
+    .waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 })
+    .catch(() => {});
+
+  if (submitBtn && submitBtn.click) {
+    await submitBtn.click();
+  } else {
+    await page.keyboard.press("Enter");
+  }
+
+  await navPromise;
+  await delay(3000); // Let React hydrate the next view
+
+  // Check for 2FA / verification code challenge
+  const twoFASelectors = [
+    'input[name="code"]',
+    'input[name="otp"]',
+    'input[name="verificationCode"]',
+    'input[type="text"][maxlength="6"]',
+    'input[autocomplete="one-time-code"]',
+    'input[placeholder*="code" i]',
+    'input#code',
+    'input#otp',
+  ];
+
+  let twoFAField = null;
+  let twoFASelector = null;
+
+  for (const sel of twoFASelectors) {
+    try {
+      twoFAField = await page.waitForSelector(sel, { timeout: 3000, visible: true });
+      if (twoFAField) {
+        twoFASelector = sel;
+        break;
+      }
+    } catch {}
+  }
+
+  // Also check page text for 2FA indicators
+  const pageText = await page.evaluate(() => document.body.innerText);
+  const is2FAPage =
+    twoFAField ||
+    /verification code|two.factor|2fa|authenticate|security code/i.test(pageText);
+
+  if (is2FAPage) {
+    broadcast({
+      event: "2fa_required",
+      message: "Enter the 6-digit code sent to your device",
+disable-accelerated-2d-canvas",
+      "--disable-gpu",
+      "--window-size=1920,1080",
+    ],
   });
+  page = await browser.newPage();
+  await page.setViewport({ width: 1920, height: 1080 });
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+  );
 
-  await page.type('input[name="username"]', email, { delay: 50 });
-  await page.type('input[name="password"]', password, { delay: 50 });
+  if (fs.existsSync(COOKIE_PATH)) {
+    try {
+      const cookies = JSON.parse(fs.readFileSync(COOKIE_PATH, "utf-8"));
+      await page.setCookie(...cookies);
+      console.log("Loaded existing cookies");
+    } catch (e) {
+      console.error("Cookie load error:", e.message);
+    }
+  }
+}
 
-  const submitPromise = page.waitForNavigation({
+async function waitForAnySelector(page, selectors, options = {}) {
+  for (const selector of selectors) {
+    try {
+      const el = await page.waitForSelector(selector, { timeout: 5000, ...options });
+      if (el) return { element: el, selector };
+    } catch {}
+  }
+  throw new Error(`None of the selectors found: ${selectors.join(", ")}`);
+}
+
+async function performLogin(email, password) {
+  await launchBrowser();
+
+  await page.goto("https://accounts.snapchat.com/accounts/login", {
     waitUntil: "networkidle2",
-    timeout: 15000,
+    timeout: 60000,
   });
 
-  await page.click("button[type='submit']");
-  await submitPromise.catch(() => {});
+  // Wait for the login form to hydrate — Snapchat renders a skeleton first
+  await page.waitForFunction(
+    () => document.querySelectorAll("input").length >= 2,
+    { timeout: 15000 }
+  );
 
-  const twoFAField = await page
-    .$('input[name="code"]')
-    .catch(() => null);
+  // Try multiple possible selectors for the username/email field
+  const usernameSelectors = [
+    'input[name="username"]',
+    'input[name="identifier"]',
+    'input[name="accountIdentifier"]',
+    'input[type="text"]',
+    'input[autocomplete="username"]',
+    'input[placeholder*="username" i]',
+    'input[placeholder*="email" i]',
+    'input[placeholder*="phone" i]',
+    'input#username',
+    'input#identifier',
+  ];
 
-  if (twoFAField) {
+  const passwordSelectors = [
+    'input[name="password"]',
+    'input[type="password"]',
+    'input[autocomplete="current-password"]',
+    'input#password',
+  ];
+
+  const submitSelectors = [
+    "button[type='submit']",
+    'button[data-testid="login-button"]',
+    "button:has-text('Log In')",
+    "button:has-text('Sign In')",
+    "button:has-text('Continue')",
+  ];
+
+  const { element: userField, selector: userSel } = await waitForAnySelector(
+    page,
+    usernameSelectors,
+    { visible: true }
+  );
+  console.log("Found username field via:", userSel);
+
+  await userField.type(email, { delay: 50 });
+
+  const { element: passField, selector: passSel } = await waitForAnySelector(
+    page,
+    passwordSelectors,
+    { visible: true }
+  );
+  console.log("Found password field via:", passSel);
+
+  await passField.type(password, { delay: 50 });
+
+  // Try to find submit button
+  let submitBtn = null;
+  for (const sel of submitSelectors) {
+    try {
+      submitBtn = await page.waitForSelector(sel, { timeout: 3000, visible: true });
+      if (submitBtn) break;
+    } catch {}
+  }
+
+  if (!submitBtn) {
+    // Last resort: find any button near the password field
+    submitBtn = await passField.evaluateHandle((el) => {
+      let node = el;
+      while (node && node.tagName !== "FORM") {
+        node = node.parentElement;
+        if (!node) break;
+      }
+      return node ? node.querySelector("button[type='submit'], button") : null;
+    });
+  }
+
+  const navPromise = page
+    .waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 })
+    .catch(() => {});
+
+  if (submitBtn && submitBtn.click) {
+    await submitBtn.click();
+  } else {
+    await page.keyboard.press("Enter");
+  }
+
+  await navPromise;
+  await delay(3000); // Let React hydrate the next view
+
+  // Check for 2FA / verification code challenge
+  const twoFASelectors = [
+    'input[name="code"]',
+    'input[name="otp"]',
+    'input[name="verificationCode"]',
+    'input[type="text"][maxlength="6"]',
+    'input[autocomplete="one-time-code"]',
+    'input[placeholder*="code" i]',
+    'input#code',
+    'input#otp',
+  ];
+
+  let twoFAField = null;
+  let twoFASelector = null;
+
+  for (const sel of twoFASelectors) {
+    try {
+      twoFAField = await page.waitForSelector(sel, { timeout: 3000, visible: true });
+      if (twoFAField) {
+        twoFASelector = sel;
+        break;
+      }
+    } catch {}
+  }
+
+  // Also check page text for 2FA indicators
+  const pageText = await page.evaluate(() => document.body.innerText);
+  const is2FAPage =
+    twoFAField ||
+    /verification code|two.factor|2fa|authenticate|security code/i.test(pageText);
+
+  if (is2FAPage) {
     broadcast({
       event: "2fa_required",
       message: "Enter the 6-digit code sent to your device",
@@ -96,13 +367,24 @@ async function performLogin(email, password) {
       setTimeout(() => reject(new Error("2FA timeout — 120s expired")), 120000);
     });
 
-    await page.type('input[name="code"]', code, { delay: 100 });
-    await page.click("button[type='submit']");
+    if (twoFAField) {
+      await twoFAField.type(code, { delay: 100 });
+    } else {
+      // If we detected 2FA text but no input found, try generic input
+      const genericInput = await page.$('input[type="text"]');
+      if (genericInput) await genericInput.type(code, { delay: 100 });
+    }
 
-    await page.waitForNavigation({
-      waitUntil: "networkidle2",
-      timeout: 15000,
-    });
+    const submit2FA = await page.$("button[type='submit']");
+    if (submit2FA) {
+      await submit2FA.click();
+    } else {
+      await page.keyboard.press("Enter");
+    }
+
+    await page
+      .waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 })
+      .catch(() => {});
   }
 
   const cookies = await page.cookies();
@@ -112,13 +394,20 @@ async function performLogin(email, password) {
   const loggedIn =
     url.includes("web.snapchat.com") ||
     url.includes("accounts.snapchat.com/accounts/welcome") ||
-    url.includes("accounts.snapchat.com/accounts/v2");
+    url.includes("accounts.snapchat.com/accounts/v2") ||
+    !url.includes("login");
 
   if (loggedIn) {
     broadcast({ event: "logged_in", message: "Successfully logged in" });
     return { success: true, url };
   } else {
-    throw new Error(`Login failed or unexpected redirect: ${url}`);
+    const errorText = await page.evaluate(() => {
+      const err = document.querySelector('[role="alert"], .error, .Error');
+      return err ? err.innerText : "";
+    });
+    throw new Error(
+      `Login failed. URL: ${url}. ${errorText ? "Error: " + errorText : ""}`
+    );
   }
 }
 
@@ -128,6 +417,10 @@ function broadcast(data) {
       client.send(JSON.stringify(data));
     }
   });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 app.post("/api/login", async (req, res) => {
@@ -180,6 +473,20 @@ app.post("/api/logout", async (req, res) => {
     fs.unlinkSync(COOKIE_PATH);
   }
   res.json({ success: true });
+});
+
+// Debug endpoint: capture screenshot of current page
+app.get("/api/debug/screenshot", async (req, res) => {
+  if (!page) return res.status(400).json({ error: "No active page" });
+  const buffer = await page.screenshot({ encoding: "base64", fullPage: true });
+  res.json({ screenshot: buffer });
+});
+
+// Debug endpoint: dump current page HTML
+app.get("/api/debug/html", async (req, res) => {
+  if (!page) return res.status(400).json({ error: "No active page" });
+  const html = await page.content();
+  res.type("html").send(html);
 });
 
 wss.on("connection", (ws) => {
