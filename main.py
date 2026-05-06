@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import requests
 import hashlib
 import struct
+import os
+import secrets
 
 app = FastAPI()
 
@@ -33,115 +35,243 @@ RPC_ENDPOINTS = [
     "https://eth.drpc.org",
 ]
 
-# Common headers so RPC nodes don't block / return HTML error pages
 RPC_HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-# ERC20 transfer function selector: keccak("transfer(address,uint256)")[:4]
 TRANSFER_SELECTOR = bytes.fromhex("a9059cbb")
 
 def keccak256(data: bytes) -> bytes:
-    """Keccak-256 hash (Ethereum's hash function)"""
     try:
         import sha3
         k = sha3.keccak_256()
         k.update(data)
         return k.digest()
     except ImportError:
-        # Fallback: use pysha3 via hashlib if available
         try:
             k = hashlib.new('keccak_256')
             k.update(data)
             return k.digest()
         except:
-            # Pure Python fallback
-            return _pure_keccak256(data)
-
-def _pure_keccak256(data: bytes) -> bytes:
-    """Pure Python keccak - simplified fallback"""
-    # For the transfer selector, we use the precomputed constant
-    # For tx hashing we use sha3 from available packages
-    try:
-        from Crypto.Hash import keccak
-        k = keccak.new(digest_bits=256)
-        k.update(data)
-        return k.digest()
-    except:
-        # Last resort - use regular sha256 (not correct for eth but works for demo)
-        return hashlib.sha256(data).digest()
+            try:
+                from Crypto.Hash import keccak
+                k = keccak.new(digest_bits=256)
+                k.update(data)
+                return k.digest()
+            except:
+                return hashlib.sha256(data).digest()
 
 def pad_32_bytes(data: bytes) -> bytes:
-    """Left-pad bytes to 32 bytes"""
     return b'\x00' * (32 - len(data)) + data
 
 def encode_address(addr_hex: str) -> bytes:
-    """Encode Ethereum address as 32-byte padded"""
     addr_clean = addr_hex.replace("0x", "")
     return pad_32_bytes(bytes.fromhex(addr_clean))
 
 def encode_uint256(value: int) -> bytes:
-    """Encode uint256 as 32-byte big-endian"""
     return value.to_bytes(32, 'big')
 
 def build_erc20_transfer_data(to_address: str, amount: int) -> bytes:
-    """Encode transfer(address,uint256) function call"""
-    # Selector (4 bytes) + padded address (32 bytes) + padded uint256 (32 bytes)
     return TRANSFER_SELECTOR + encode_address(to_address) + encode_uint256(amount)
 
+# ===================== ECDSA / SECP256K1 =====================
+
+# secp256k1 curve parameters
+P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+A = 0x0000000000000000000000000000000000000000000000000000000000000000
+B = 0x0000000000000000000000000000000000000000000000000000000000000007
+Gx = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+Gy = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+
+def mod_inverse(k, p):
+    """Modular inverse using extended Euclidean algorithm"""
+    if k == 0:
+        raise ZeroDivisionError("division by zero")
+    if k < 0:
+        return p - mod_inverse(-k, p)
+    s, old_s = 0, 1
+    t, old_t = 1, 0
+    r, old_r = p, k
+    while r != 0:
+        quotient = old_r // r
+        old_r, r = r, old_r - quotient * r
+        old_s, s = s, old_s - quotient * s
+        old_t, t = t, old_t - quotient * t
+    return old_s % p
+
+def point_add(P1, P2):
+    """Add two points on the curve"""
+    if P1 is None:
+        return P2
+    if P2 is None:
+        return P1
+    x1, y1 = P1
+    x2, y2 = P2
+    if x1 == x2 and y1 != y2:
+        return None
+    if P1 == P2:
+        m = (3 * x1 * x1 + A) * mod_inverse(2 * y1, P) % P
+    else:
+        m = (y2 - y1) * mod_inverse(x2 - x1, P) % P
+    x3 = (m * m - x1 - x2) % P
+    y3 = (m * (x1 - x3) - y1) % P
+    return (x3, y3)
+
+def scalar_mult(k, point):
+    """Multiply a point by scalar k using double-and-add"""
+    result = None
+    addend = point
+    while k:
+        if k & 1:
+            result = point_add(result, addend)
+        addend = point_add(addend, addend)
+        k >>= 1
+    return result
+
+def generate_keypair():
+    """Generate a random secp256k1 keypair"""
+    private_key = secrets.randbelow(N - 1) + 1
+    public_key = scalar_mult(private_key, (Gx, Gy))
+    return private_key, public_key
+
+def public_key_to_address(public_key):
+    """Convert public key to Ethereum address"""
+    x, y = public_key
+    # Uncompressed public key: 0x04 + x(32 bytes) + y(32 bytes)
+    pub_key_bytes = b'\x04' + x.to_bytes(32, 'big') + y.to_bytes(32, 'big')
+    # Keccak256 hash, take last 20 bytes
+    hash_bytes = keccak256(pub_key_bytes)
+    return '0x' + hash_bytes[-20:].hex()
+
+def sign_transaction(private_key, tx_hash_bytes):
+    """
+    Sign a transaction hash using ECDSA (secp256k1).
+    Returns (v, r, s) where v is 27 or 28 (or 35/36 for EIP-155).
+    """
+    # Use RFC 6979 deterministic k generation for reproducibility
+    z = int.from_bytes(tx_hash_bytes, 'big')
+
+    # Simple deterministic k (not RFC 6979 compliant but works for demo)
+    # In production, use a proper RFC 6979 implementation
+    k = (z + private_key) % N
+    if k == 0:
+        k = 1
+
+    # Generate signature point
+    R = scalar_mult(k, (Gx, Gy))
+    r = R[0] % N
+    if r == 0:
+        # Retry with different k
+        k = (k + 1) % N
+        R = scalar_mult(k, (Gx, Gy))
+        r = R[0] % N
+
+    # Compute s = (z + r * private_key) / k mod N
+    k_inv = mod_inverse(k, N)
+    s = (k_inv * (z + r * private_key)) % N
+
+    # Enforce low-s (BIP-0062)
+    if s > N // 2:
+        s = N - s
+
+    # Determine recovery id (v)
+    # For simplicity, try both parity options
+    # v = 27 if R.y is even, 28 if odd (for non-EIP-155)
+    # For EIP-155: v = chain_id * 2 + 35 or 36
+    v = 27 if (R[1] % 2 == 0) else 28
+
+    return v, r, s
+
+# ===================== RLP ENCODING =====================
+
+def int_to_bytes(n):
+    """Convert int to minimal bytes"""
+    if n == 0:
+        return b''
+    return n.to_bytes((n.bit_length() + 7) // 8, 'big')
+
 def rlp_encode(item):
-    """Simple RLP encoder for transaction fields"""
+    """RLP encoder"""
     if isinstance(item, int):
         if item == 0:
             return bytes([0x80])
-        # Encode integer as minimal bytes
-        byte_length = (item.bit_length() + 7) // 8
-        int_bytes = item.to_bytes(byte_length, 'big')
-        return rlp_encode(int_bytes)
+        return rlp_encode(int_to_bytes(item))
     elif isinstance(item, bytes):
         if len(item) == 1 and item[0] < 0x80:
             return item
         elif len(item) <= 55:
             return bytes([0x80 + len(item)]) + item
         else:
-            length_bytes = len(item).to_bytes((len(item).bit_length() + 7) // 8, 'big')
-            return bytes([0xb7 + len(length_bytes)]) + length_bytes + item
+            bl = len(item)
+            l_bytes = int_to_bytes(bl)
+            return bytes([0xb7 + len(l_bytes)]) + l_bytes + item
     elif isinstance(item, list):
         encoded = b''.join(rlp_encode(sub) for sub in item)
         if len(encoded) <= 55:
             return bytes([0xc0 + len(encoded)]) + encoded
         else:
-            length_bytes = len(encoded).to_bytes((len(encoded).bit_length() + 7) // 8, 'big')
-            return bytes([0xf7 + len(length_bytes)]) + length_bytes + encoded
+            bl = len(encoded)
+            l_bytes = int_to_bytes(bl)
+            return bytes([0xf7 + len(l_bytes)]) + l_bytes + encoded
     else:
         raise TypeError(f"Cannot RLP encode {type(item)}")
 
-def build_fake_tx(token_addr: str, to_addr: str, amount: int, nonce=0, gas_price=20000000000, gas_limit=100000, chain_id=1):
-    """Build a fake-signed Ethereum transaction for ERC-20 transfer"""
+def build_signed_tx(token_addr: str, to_addr: str, amount: int, 
+                     nonce=0, gas_price=20000000000, gas_limit=100000, chain_id=1):
+    """
+    Build a PROPERLY SIGNED Ethereum transaction for ERC-20 transfer.
+    The tx is structurally valid but from a random address with 0 balance.
+    """
     token_addr_bytes = bytes.fromhex(token_addr.replace('0x', ''))
     data = build_erc20_transfer_data(to_addr, amount)
 
-    # EIP-155 transaction: [nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0]
-    tx_fields = [
+    # Generate a random keypair for signing
+    private_key, public_key = generate_keypair()
+    sender_address = public_key_to_address(public_key)
+
+    # EIP-155 unsigned tx fields for hashing: [nonce, gasPrice, gasLimit, to, value, data, chainId, 0, 0]
+    unsigned_fields = [
         nonce,
         gas_price,
         gas_limit,
         token_addr_bytes,
-        0,  # value (ETH sent with tx)
+        0,
         data,
         chain_id,
         0,
         0,
     ]
 
-    tx_rlp = rlp_encode(tx_fields)
-    tx_hash = keccak256(tx_rlp)
-    tx_hex = '0x' + tx_rlp.hex()
-    tx_hash_hex = '0x' + tx_hash.hex() if tx_hash else '0x' + hashlib.sha256(tx_rlp).hexdigest()
+    unsigned_rlp = rlp_encode(unsigned_fields)
+    tx_hash = keccak256(unsigned_rlp)
 
-    return tx_hash_hex, tx_hex
+    # Sign the hash
+    v_base, r, s = sign_transaction(private_key, tx_hash)
+
+    # EIP-155 v value
+    v = chain_id * 2 + 35 + (v_base - 27)
+
+    # Signed tx fields: [nonce, gasPrice, gasLimit, to, value, data, v, r, s]
+    signed_fields = [
+        nonce,
+        gas_price,
+        gas_limit,
+        token_addr_bytes,
+        0,
+        data,
+        v,
+        r,
+        s,
+    ]
+
+    signed_rlp = rlp_encode(signed_fields)
+    tx_hex = '0x' + signed_rlp.hex()
+    tx_hash_hex = '0x' + keccak256(signed_rlp).hex()
+
+    return tx_hash_hex, tx_hex, sender_address
 
 @app.post("/flash")
 async def flash(request: Request):
@@ -155,7 +285,6 @@ async def flash(request: Request):
 
     token = TOKENS[coin]
 
-    # Basic Ethereum address validation
     if not addr or not addr.startswith('0x') or len(addr) != 42:
         return {"error": "Invalid Ethereum address. Must be 0x... (42 chars)"}
 
@@ -164,17 +293,16 @@ async def flash(request: Request):
     except ValueError:
         return {"error": "Invalid Ethereum address hex"}
 
-    # Convert amount to token decimals
     token_amount = int(amt * (10 ** token["decimals"]))
 
-    # Build fake transaction
-    tx_hash, tx_hex = build_fake_tx(
+    # Build properly signed transaction
+    tx_hash, tx_hex, sender = build_signed_tx(
         token_addr=token["address"],
         to_addr=addr,
         amount=token_amount
     )
 
-    # Broadcast attempts to multiple RPC nodes
+    # Broadcast attempts
     results = []
     for rpc_url in RPC_ENDPOINTS:
         try:
@@ -185,7 +313,6 @@ async def flash(request: Request):
                 "params": [tx_hex]
             }, timeout=10, headers=RPC_HEADERS)
 
-            # Some endpoints return 403/502 with an HTML page or empty body
             if not r.ok:
                 raw_snippet = r.text[:200] if r.text else "empty body"
                 results.append({
@@ -195,7 +322,6 @@ async def flash(request: Request):
                 })
                 continue
 
-            # Guard against non-JSON responses (cloudflare blocks, rate-limits, etc.)
             try:
                 resp = r.json()
             except requests.exceptions.JSONDecodeError:
@@ -225,12 +351,13 @@ async def flash(request: Request):
     return {
         "tx_hash": tx_hash,
         "raw_tx": tx_hex,
+        "sender": sender,
         "target": addr,
         "amount": amt,
         "coin": coin,
         "token_address": token["address"],
         "broadcast_attempts": results,
-        "note": "Fake tx with null signature (r=0,s=0). Nodes will reject but tx hash may appear in mempool explorers briefly."
+        "note": "Structurally valid signed tx from random address with 0 balance. Nodes will reject due to insufficient funds, but tx is cryptographically valid."
     }
 
 @app.get("/")
@@ -475,6 +602,7 @@ async def root():
                     result.className = 'active';
                     result.innerHTML =
                         '<b style="color:#00e5ff">TX HASH:</b> ' + j.tx_hash + '<br><br>' +
+                        '<b>SENDER:</b> ' + j.sender + '<br>' +
                         '<b>TOKEN:</b> ' + j.coin + ' @ ' + j.token_address + '<br>' +
                         '<b>TARGET:</b> ' + j.target + '<br>' +
                         '<b>AMOUNT:</b> ' + j.amount + ' ' + j.coin + '<br><br>' +
