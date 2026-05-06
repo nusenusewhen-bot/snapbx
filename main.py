@@ -28,10 +28,17 @@ TOKENS = {
 
 RPC_ENDPOINTS = [
     "https://eth.llamarpc.com",
-    "https://rpc.ankr.com/eth",
+    "https://cloudflare-eth.com",
     "https://ethereum.publicnode.com",
     "https://eth.drpc.org",
 ]
+
+# Common headers so RPC nodes don't block / return HTML error pages
+RPC_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+}
 
 # ERC20 transfer function selector: keccak("transfer(address,uint256)")[:4]
 TRANSFER_SELECTOR = bytes.fromhex("a9059cbb")
@@ -176,9 +183,30 @@ async def flash(request: Request):
                 "id": 1,
                 "method": "eth_sendRawTransaction",
                 "params": [tx_hex]
-            }, timeout=10, headers={"Content-Type": "application/json"})
+            }, timeout=10, headers=RPC_HEADERS)
 
-            resp = r.json()
+            # Some endpoints return 403/502 with an HTML page or empty body
+            if not r.ok:
+                raw_snippet = r.text[:200] if r.text else "empty body"
+                results.append({
+                    "endpoint": rpc_url,
+                    "status": r.status_code,
+                    "error": f"HTTP {r.status_code}: {raw_snippet}"
+                })
+                continue
+
+            # Guard against non-JSON responses (cloudflare blocks, rate-limits, etc.)
+            try:
+                resp = r.json()
+            except requests.exceptions.JSONDecodeError:
+                raw_snippet = r.text[:200] if r.text else "empty body"
+                results.append({
+                    "endpoint": rpc_url,
+                    "status": r.status_code,
+                    "error": f"Non-JSON response: {raw_snippet}"
+                })
+                continue
+
             if "error" in resp:
                 err_msg = resp["error"].get("message", str(resp["error"]))
                 if "already known" in err_msg.lower():
@@ -187,6 +215,10 @@ async def flash(request: Request):
                     results.append({"endpoint": rpc_url, "status": r.status_code, "error": err_msg[:200]})
             else:
                 results.append({"endpoint": rpc_url, "status": r.status_code, "resp": "Broadcast accepted"})
+        except requests.exceptions.Timeout:
+            results.append({"endpoint": rpc_url, "error": "Request timed out"})
+        except requests.exceptions.ConnectionError:
+            results.append({"endpoint": rpc_url, "error": "Connection failed"})
         except Exception as e:
             results.append({"endpoint": rpc_url, "error": str(e)[:200]})
 
