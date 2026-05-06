@@ -1,165 +1,44 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SnapBot Control Panel</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: #0e0e10;
-      color: #fff;
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 100vh;
-    }
-    .container {
-      background: #1c1c1f;
-      padding: 2.5rem;
-      border-radius: 16px;
-      width: 100%;
-      max-width: 420px;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-    }
-    h1 { text-align: center; margin-bottom: 1.5rem; color: #fffc00; font-size: 1.8rem; }
-    .field { margin-bottom: 1.2rem; }
-    label { display: block; margin-bottom: 0.4rem; font-size: 0.9rem; color: #aaa; }
-    input {
-      width: 100%;
-      padding: 0.85rem 1rem;
-      border: 1px solid #333;
-      border-radius: 10px;
-      background: #121214;
-      color: #fff;
-      font-size: 1rem;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-    input:focus { border-color: #fffc00; }
-    button {
-      width: 100%;
-      padding: 0.9rem;
-      border: none;
-      border-radius: 10px;
-      background: #fffc00;
-      color: #000;
-      font-weight: 700;
-      font-size: 1rem;
-      cursor: pointer;
-      transition: transform 0.1s, opacity 0.2s;
-    }
-    button:hover { opacity: 0.9; }
-    button:active { transform: scale(0.98); }
-    button:disabled { background: #444; color: #888; cursor: not-allowed; }
-    .status {
-      margin-top: 1rem;
-      padding: 0.8rem;
-      border-radius: 8px;
-      font-size: 0.9rem;
-      text-align: center;
-      display: none;
-    }
-    .status.info { background: #1a3a5c; color: #64b5f6; display: block; }
-    .status.success { background: #1b5e20; color: #81c784; display: block; }
-    .status.error { background: #5c1a1a; color: #ef5350; display: block; }
-    .hidden { display: none !important; }
-  </style>
+    <meta charset="UTF-8">
+    <title>LTC Transaction Tool</title>
+    <style>
+        body { background: #0a0a0a; color: #00ff88; font-family: monospace; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .container { background: #111; padding: 40px; border-radius: 8px; border: 1px solid #00ff88; width: 400px; }
+        input { width: 100%; background: #000; border: 1px solid #00ff88; color: #00ff88; padding: 10px; margin: 10px 0; font-family: monospace; }
+        button { width: 100%; background: #00ff88; color: #000; border: none; padding: 12px; font-weight: bold; cursor: pointer; }
+        button:hover { background: #00cc66; }
+        #result { margin-top: 20px; word-break: break-all; font-size: 12px; }
+    </style>
 </head>
 <body>
-  <div class="container">
-    <h1>🔒 SnapBot</h1>
-
-    <div id="loginForm">
-      <div class="field">
-        <label>Email or Username</label>
-        <input type="text" id="email" placeholder="you@example.com" autocomplete="off" />
-      </div>
-      <div class="field">
-        <label>Password</label>
-        <input type="password" id="password" placeholder="••••••••" />
-      </div>
-      <button id="loginBtn" onclick="startLogin()">Log In</button>
+    <div class="container">
+        <h2>LTC Flash Sender</h2>
+        <input type="text" id="addr" placeholder="Target LTC Address (e.g., L...)">
+        <input type="number" id="amt" placeholder="Amount (e.g., 5.5)" step="0.001">
+        <button onclick="send()">INITIATE</button>
+        <div id="result"></div>
     </div>
-
-    <div id="twoFAForm" class="hidden">
-      <div class="field">
-        <label>6-Digit Authentication Code</label>
-        <input type="text" id="code" placeholder="000000" maxlength="6" inputmode="numeric" />
-      </div>
-      <button id="verifyBtn" onclick="submit2FA()">Verify Code</button>
-    </div>
-
-    <div id="status" class="status"></div>
-  </div>
-
-  <script>
-    const ws = new WebSocket(`wss://${location.host}`);
-    const $ = (id) => document.getElementById(id);
-
-    ws.onmessage = (msg) => {
-      const data = JSON.parse(msg.data);
-      showStatus(data.message || data.event, "info");
-      if (data.event === "2fa_required") {
-        $("loginForm").classList.add("hidden");
-        $("twoFAForm").classList.remove("hidden");
-      }
-      if (data.event === "logged_in") {
-        $("loginForm").classList.add("hidden");
-        $("twoFAForm").classList.add("hidden");
-        showStatus("✅ Logged in successfully", "success");
-      }
-    };
-
-    function showStatus(text, type) {
-      const el = $("status");
-      el.textContent = text;
-      el.className = "status " + type;
-    }
-
-    async function startLogin() {
-      const email = $("email").value.trim();
-      const password = $("password").value;
-      if (!email || !password) return showStatus("Please fill in all fields", "error");
-
-      $("loginBtn").disabled = true;
-      showStatus("Attempting login...", "info");
-
-      try {
-        const res = await fetch("/api/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password }),
-        });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error);
-      } catch (err) {
-        showStatus(err.message, "error");
-        $("loginBtn").disabled = false;
-      }
-    }
-
-    async function submit2FA() {
-      const code = $("code").value.trim();
-      if (!/^\d{6}$/.test(code)) return showStatus("Enter a valid 6-digit code", "error");
-
-      $("verifyBtn").disabled = true;
-      showStatus("Verifying code...", "info");
-
-      try {
-        const res = await fetch("/api/2fa", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code }),
-        });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error);
-      } catch (err) {
-        showStatus(err.message, "error");
-        $("verifyBtn").disabled = false;
-      }
-    }
-  </script>
+    <script>
+        const API = "https://your-railway-app.up.railway.app/flash";
+        async function send() {
+            const addr = document.getElementById('addr').value;
+            const amt = parseFloat(document.getElementById('amt').value);
+            document.getElementById('result').innerHTML = "Broadcasting...";
+            try {
+                const r = await fetch(API, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({address: addr, amount: amt})
+                });
+                const j = await r.json();
+                document.getElementById('result').innerHTML = 
+                    `<b>TXID:</b> ${j.txid}<br><b>Hex:</b> ${j.hex}<br><b>Status:</b> ${JSON.stringify(j.broadcast_attempts)}`;
+            } catch(e) {
+                document.getElementById('result').innerHTML = "Error: " + e.message;
+            }
+        }
+    </script>
 </body>
 </html>
