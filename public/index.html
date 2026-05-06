@@ -1,44 +1,185 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>LTC Transaction Tool</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LTC Flash</title>
     <style>
-        body { background: #0a0a0a; color: #00ff88; font-family: monospace; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .container { background: #111; padding: 40px; border-radius: 8px; border: 1px solid #00ff88; width: 400px; }
-        input { width: 100%; background: #000; border: 1px solid #00ff88; color: #00ff88; padding: 10px; margin: 10px 0; font-family: monospace; }
-        button { width: 100%; background: #00ff88; color: #000; border: none; padding: 12px; font-weight: bold; cursor: pointer; }
-        button:hover { background: #00cc66; }
-        #result { margin-top: 20px; word-break: break-all; font-size: 12px; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0a0a;
+            color: #00ff88;
+            font-family: 'Courier New', monospace;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            background: #111;
+            border: 1px solid #00ff88;
+            border-radius: 8px;
+            padding: 40px;
+            width: 100%;
+            max-width: 500px;
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.1);
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 24px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        .input-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        input {
+            width: 100%;
+            background: #000;
+            border: 1px solid #00ff88;
+            color: #00ff88;
+            padding: 12px;
+            font-family: inherit;
+            font-size: 14px;
+            outline: none;
+        }
+        input:focus {
+            box-shadow: 0 0 10px rgba(0, 255, 136, 0.3);
+        }
+        button {
+            width: 100%;
+            background: #00ff88;
+            color: #000;
+            border: none;
+            padding: 14px;
+            font-family: inherit;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-top: 10px;
+        }
+        button:hover {
+            background: #00cc66;
+        }
+        button:disabled {
+            background: #004d33;
+            cursor: not-allowed;
+        }
+        #result {
+            margin-top: 25px;
+            padding: 15px;
+            background: #000;
+            border: 1px solid #00ff88;
+            font-size: 11px;
+            word-break: break-all;
+            line-height: 1.6;
+            display: none;
+        }
+        #result.active {
+            display: block;
+        }
+        .error {
+            color: #ff0044;
+            border-color: #ff0044;
+        }
+        .loading {
+            text-align: center;
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h2>LTC Flash Sender</h2>
-        <input type="text" id="addr" placeholder="Target LTC Address (e.g., L...)">
-        <input type="number" id="amt" placeholder="Amount (e.g., 5.5)" step="0.001">
-        <button onclick="send()">INITIATE</button>
+        <h1>LTC Flash Sender</h1>
+        <div class="input-group">
+            <label>Target Address</label>
+            <input type="text" id="addr" placeholder="L..." autocomplete="off">
+        </div>
+        <div class="input-group">
+            <label>Amount (LTC)</label>
+            <input type="number" id="amt" placeholder="0.00" step="0.001">
+        </div>
+        <button onclick="flash()" id="btn">INITIATE</button>
         <div id="result"></div>
     </div>
+
     <script>
-        const API = "https://your-railway-app.up.railway.app/flash";
-        async function send() {
-            const addr = document.getElementById('addr').value;
+        async function flash() {
+            const addr = document.getElementById('addr').value.trim();
             const amt = parseFloat(document.getElementById('amt').value);
-            document.getElementById('result').innerHTML = "Broadcasting...";
+            const result = document.getElementById('result');
+            const btn = document.getElementById('btn');
+
+            if (!addr || !addr.startsWith('L')) {
+                result.className = 'active error';
+                result.innerHTML = 'ERROR: Invalid LTC address. Must start with L.';
+                return;
+            }
+            if (!amt || amt <= 0) {
+                result.className = 'active error';
+                result.innerHTML = 'ERROR: Amount must be greater than 0.';
+                return;
+            }
+
+            btn.disabled = true;
+            result.className = 'active';
+            result.innerHTML = '<div class="loading">BROADCASTING TO NETWORK...</div>';
+
             try {
-                const r = await fetch(API, {
+                const r = await fetch('/flash', {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({address: addr, amount: amt})
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ address: addr, amount: amt })
                 });
+                
                 const j = await r.json();
-                document.getElementById('result').innerHTML = 
-                    `<b>TXID:</b> ${j.txid}<br><b>Hex:</b> ${j.hex}<br><b>Status:</b> ${JSON.stringify(j.broadcast_attempts)}`;
-            } catch(e) {
-                document.getElementById('result').innerHTML = "Error: " + e.message;
+                
+                if (j.error) {
+                    result.className = 'active error';
+                    result.innerHTML = `ERROR: ${j.error}`;
+                } else {
+                    result.className = 'active';
+                    result.innerHTML = `
+                        <b>TXID:</b> ${j.txid}<br><br>
+                        <b>TARGET:</b> ${j.target}<br>
+                        <b>AMOUNT:</b> ${j.amount} LTC<br><br>
+                        <b>HEX:</b> ${j.hex}<br><br>
+                        <b>BROADCAST STATUS:</b><br>
+                        ${j.broadcast_attempts.map(a => 
+                            `${a.endpoint}: ${a.status || a.error}<br>`
+                        ).join('')}
+                        <br><i>${j.note}</i>
+                    `;
+                }
+            } catch (e) {
+                result.className = 'active error';
+                result.innerHTML = `ERROR: ${e.message}`;
+            } finally {
+                btn.disabled = false;
             }
         }
+
+        document.getElementById('addr').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') flash();
+        });
+        document.getElementById('amt').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') flash();
+        });
     </script>
 </body>
 </html>
